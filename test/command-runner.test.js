@@ -33,7 +33,7 @@ describe("tersh command runner", () => {
   });
 
   it("recognizes unimplemented planned commands with predictable placeholder failures", async () => {
-    for (const command of commands.filter((command) => !["login", "logout", "hosts"].includes(command.name))) {
+    for (const command of commands.filter((command) => !["login", "logout", "hosts", "connect"].includes(command.name))) {
       const result = await run([command.name]);
 
       assert.equal(result.exitCode, 2, command.name);

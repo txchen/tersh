@@ -1,9 +1,10 @@
 import { TermixAuthClient } from "./auth-client.js";
 import { JsonConfigStore } from "./config-store.js";
-import { formatHostList, sshCapableHosts, TermixHostClient } from "./host-discovery.js";
+import { formatHostList, hasTerminalMetadata, isSshTerminalEnabled, sanitizeHostForTerminal, sshCapableHosts, TermixHostClient } from "./host-discovery.js";
 import { createNodePrompts } from "./prompts.js";
 import { createTokenStore } from "./token-storage.js";
 import { normalizeServerUrl } from "./tls-policy.js";
+import { startTerminalBridge, terminalWebSocketUrl } from "./tty-bridge.js";
 
 export const commands = [
   {
@@ -22,7 +23,7 @@ export const commands = [
     name: "connect",
     usage: "connect [host-id-or-name]",
     summary: "Connect to a Termix-managed host",
-    detail: "Connect to a Termix-managed host. TTY bridge implementation will be added in a later slice.",
+    detail: "Connect to a Termix-managed host through the Terminal transport.",
   },
   {
     name: "logout",
@@ -68,6 +69,10 @@ export async function runCommand(args, io = {}, deps = {}) {
 
   if (command === "hosts") {
     return runHosts({ stdout, stderr }, deps);
+  }
+
+  if (command === "connect") {
+    return runConnect(args.slice(1), { stdin: io.stdin ?? process.stdin, stdout, stderr }, deps);
   }
 
   if (command === "logout") {
@@ -207,6 +212,76 @@ async function runHosts(io, deps) {
   } catch (error) {
     io.stderr.write(`${error.message}\n`);
     return 1;
+  }
+}
+
+async function runConnect(args, io, deps) {
+  try {
+    const target = args[0];
+    if (target === undefined) {
+      throw new Error("Usage: tersh connect <host-id-or-name>");
+    }
+
+    const { config, token } = await loadConfigAndToken(deps);
+    const hostClient = deps.hostClient ?? new TermixHostClient();
+    const listedHosts = await hostClient.listHosts({
+      serverUrl: config.serverUrl,
+      token,
+      tls: config.tls ?? {},
+    });
+    const hostConfig = selectHost(listedHosts.filter(isSshTerminalEnabled), target);
+    validateTerminalHost(hostConfig);
+    const sanitizedHostConfig = sanitizeHostForTerminal(hostConfig);
+    const bridgeStarter = deps.startTerminalBridge ?? startTerminalBridge;
+
+    return await bridgeStarter({
+      webSocketUrl: terminalWebSocketUrl(config.serverUrl, token),
+      hostConfig: sanitizedHostConfig,
+      stdin: io.stdin,
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+  } catch (error) {
+    io.stderr.write(`${error.message}\n`);
+    return 1;
+  }
+}
+
+async function loadConfigAndToken(deps) {
+  const configStore = deps.configStore ?? new JsonConfigStore();
+  const config = await configStore.load();
+  const tokenStore = deps.tokenStore ?? createTokenStore({ config });
+  const token = await tokenStore.get();
+
+  if (token === undefined) {
+    throw new Error("No stored Termix session token found. Run tersh login first.");
+  }
+
+  return { config, token };
+}
+
+function selectHost(hosts, target) {
+  const idMatch = hosts.find((host) => String(host.id) === target);
+  if (idMatch !== undefined) {
+    return idMatch;
+  }
+
+  const nameMatches = hosts.filter((host) => host.name === target);
+
+  if (nameMatches.length === 1) {
+    return nameMatches[0];
+  }
+
+  if (nameMatches.length > 1) {
+    throw new Error(`Ambiguous host name: ${target}`);
+  }
+
+  throw new Error(`Host not found: ${target}`);
+}
+
+function validateTerminalHost(host) {
+  if (!hasTerminalMetadata(host)) {
+    throw new Error("Host is missing required terminal metadata");
   }
 }
 

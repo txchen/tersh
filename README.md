@@ -102,6 +102,14 @@ Hosts uses the stored Termix server URL and session token to call the authentica
 
 Host secrets are not printed or stored locally.
 
+### Connect
+
+```sh
+tersh connect <host-id-or-name>
+```
+
+Connect fetches the visible host list with the stored session token, resolves the argument by id or unambiguous name, validates the selected host metadata, and opens the Termix Terminal transport. Local stdin is forwarded to the remote session, remote terminal data is written to stdout, and diagnostics stay on stderr.
+
 ## Dependencies
 
 The scaffold has no runtime dependencies and does not use Electron or browser automation.

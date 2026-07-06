@@ -26,9 +26,17 @@ export class TermixHostClient {
 
 export function sshCapableHosts(hosts) {
   return hosts
-    .filter((host) => host.enableSsh !== false && host.enableTerminal !== false)
-    .filter((host) => hasHostId(host.id) && hasText(host.ip) && hasText(host.username) && Number(host.port) > 0)
+    .filter(isSshTerminalEnabled)
+    .filter(hasTerminalMetadata)
     .map(sanitizeHostForTerminal);
+}
+
+export function isSshTerminalEnabled(host) {
+  return host?.enableSsh !== false && host?.enableTerminal !== false;
+}
+
+export function hasTerminalMetadata(host) {
+  return host !== undefined && hasHostId(host.id) && hasText(host.ip) && hasText(host.username) && Number(host.port) > 0;
 }
 
 export function sanitizeHostForTerminal(host) {
