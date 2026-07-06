@@ -33,7 +33,7 @@ describe("tersh command runner", () => {
   });
 
   it("recognizes unimplemented planned commands with predictable placeholder failures", async () => {
-    for (const command of commands.filter((command) => !["login", "logout"].includes(command.name))) {
+    for (const command of commands.filter((command) => !["login", "logout", "hosts"].includes(command.name))) {
       const result = await run([command.name]);
 
       assert.equal(result.exitCode, 2, command.name);
@@ -61,6 +61,192 @@ describe("tersh command runner", () => {
     assert.match(login.stdout, /--token-store keychain\|file/);
     assert.match(logout.stdout, /Remove the stored Termix session token while leaving non-secret server config intact/);
     assert.doesNotMatch(`${login.stdout}\n${logout.stdout}`, /later slice/);
+  });
+
+  it("lists SSH-capable hosts with safe identifying metadata", async () => {
+    const result = await run(["hosts"], {
+      configStore: {
+        load: async () => ({
+          serverUrl: "https://termix.example",
+          tls: { caFile: undefined, insecureSkipVerify: false },
+          tokenStorage: { type: "keychain" },
+        }),
+      },
+      tokenStore: { get: async () => "stored.jwt" },
+      hostClient: {
+        listHosts: async ({ serverUrl, token, tls }) => {
+          assert.equal(serverUrl, "https://termix.example");
+          assert.equal(token, "stored.jwt");
+          assert.deepEqual(tls, { caFile: undefined, insecureSkipVerify: false });
+          return [
+            {
+              id: "owned-1",
+              name: "prod",
+              username: "deploy",
+              ip: "10.0.0.10",
+              port: 22,
+              folderName: "Production",
+              tags: ["api", "blue"],
+              authType: "credential",
+              isShared: false,
+              hasPassword: true,
+              password: "secret",
+            },
+            {
+              id: "shared-1",
+              name: "shared-db",
+              username: "postgres",
+              ip: "10.0.0.11",
+              port: 2222,
+              folder: { name: "Shared" },
+              tags: [{ name: "db" }],
+              authType: "key",
+              isShared: true,
+              hasKey: true,
+            },
+            {
+              id: "rdp-1",
+              name: "windows",
+              username: "administrator",
+              ip: "10.0.0.12",
+              port: 3389,
+              enableSsh: false,
+              enableTerminal: true,
+            },
+          ];
+        },
+      },
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stderr, "");
+    assert.match(result.stdout, /prod/);
+    assert.match(result.stdout, /deploy@10\.0\.0\.10:22/);
+    assert.match(result.stdout, /Production/);
+    assert.match(result.stdout, /api, blue/);
+    assert.match(result.stdout, /credential/);
+    assert.match(result.stdout, /password/);
+    assert.match(result.stdout, /shared-db/);
+    assert.match(result.stdout, /shared/);
+    assert.doesNotMatch(result.stdout, /windows|secret/);
+  });
+
+  it("prints a clear empty state when no SSH-capable hosts are visible", async () => {
+    const result = await run(["hosts"], {
+      configStore: { load: async () => ({ serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } }) },
+      tokenStore: { get: async () => "stored.jwt" },
+      hostClient: { listHosts: async () => [] },
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "No SSH-capable Termix hosts found.\n");
+    assert.equal(result.stderr, "");
+  });
+
+  it("prompts login when hosts has no stored token", async () => {
+    const loginCalls = [];
+    const result = await run(["hosts"], {
+      configStore: { load: async () => ({ serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } }) },
+      tokenStore: { get: async () => undefined },
+      loginFlow: async () => {
+        loginCalls.push("login");
+        return 0;
+      },
+      hostClient: { listHosts: async () => [] },
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(loginCalls, ["login"]);
+    assert.match(result.stderr, /No stored Termix session token found/);
+  });
+
+  it("reloads config and token storage after a missing-token login", async () => {
+    let loadCount = 0;
+    const tokenStores = [
+      { get: async () => undefined },
+      { get: async () => "fresh.jwt" },
+    ];
+    const listedTokens = [];
+
+    const result = await run(["hosts"], {
+      configStore: {
+        load: async () => {
+          loadCount += 1;
+          return { serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } };
+        },
+      },
+      createTokenStore: () => tokenStores.shift(),
+      loginFlow: async () => 0,
+      hostClient: {
+        listHosts: async ({ token }) => {
+          listedTokens.push(token);
+          return [];
+        },
+      },
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(loadCount, 2);
+    assert.deepEqual(listedTokens, ["fresh.jwt"]);
+  });
+
+  it("returns clear listing failures without calling secret-returning host endpoints", async () => {
+    const requestedEndpoints = [];
+    const result = await run(["hosts"], {
+      configStore: { load: async () => ({ serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } }) },
+      tokenStore: { get: async () => "expired.jwt" },
+      hostClient: {
+        listHosts: async () => {
+          requestedEndpoints.push("/host/db/host");
+          throw new Error("Termix host listing failed: server unavailable");
+        },
+      },
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /server unavailable/);
+    assert.deepEqual(requestedEndpoints, ["/host/db/host"]);
+    assert.doesNotMatch(requestedEndpoints.join("\n"), /export|password|copy|quick/i);
+  });
+
+  it("offers one login retry when stored token is rejected by host listing", async () => {
+    let loadCount = 0;
+    const tokenStores = [
+      { get: async () => "expired.jwt" },
+      { get: async () => "fresh.jwt" },
+    ];
+    const loginCalls = [];
+    const listedTokens = [];
+
+    const result = await run(["hosts"], {
+      configStore: {
+        load: async () => {
+          loadCount += 1;
+          return { serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } };
+        },
+      },
+      createTokenStore: () => tokenStores.shift(),
+      loginFlow: async () => {
+        loginCalls.push("login");
+        return 0;
+      },
+      hostClient: {
+        listHosts: async ({ token }) => {
+          listedTokens.push(token);
+          if (token === "expired.jwt") {
+            throw Object.assign(new Error("authentication required"), { statusCode: 401 });
+          }
+          return [];
+        },
+      },
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(loadCount, 2);
+    assert.deepEqual(loginCalls, ["login"]);
+    assert.deepEqual(listedTokens, ["expired.jwt", "fresh.jwt"]);
+    assert.match(result.stderr, /Stored Termix session token was rejected/);
   });
 
   it("logs in with username and password and stores only the final token", async () => {

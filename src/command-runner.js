@@ -1,5 +1,6 @@
 import { TermixAuthClient } from "./auth-client.js";
 import { JsonConfigStore } from "./config-store.js";
+import { formatHostList, sshCapableHosts, TermixHostClient } from "./host-discovery.js";
 import { createNodePrompts } from "./prompts.js";
 import { createTokenStore } from "./token-storage.js";
 import { normalizeServerUrl } from "./tls-policy.js";
@@ -15,7 +16,7 @@ export const commands = [
     name: "hosts",
     usage: "hosts",
     summary: "List SSH-capable Termix hosts",
-    detail: "List SSH-capable Termix hosts. Host discovery implementation will be added in a later slice.",
+    detail: "List SSH-capable Termix hosts visible to the stored Termix session.",
   },
   {
     name: "connect",
@@ -63,6 +64,10 @@ export async function runCommand(args, io = {}, deps = {}) {
 
   if (command === "login") {
     return runLogin(args.slice(1), { stderr }, deps);
+  }
+
+  if (command === "hosts") {
+    return runHosts({ stdout, stderr }, deps);
   }
 
   if (command === "logout") {
@@ -158,6 +163,92 @@ async function runLogout(io, deps) {
     io.stderr.write(`${error.message}\n`);
     return 1;
   }
+}
+
+async function runHosts(io, deps) {
+  try {
+    const configStore = deps.configStore ?? new JsonConfigStore();
+    let config = await configStore.load();
+    const buildTokenStore = deps.createTokenStore ?? ((storeConfig) => createTokenStore({ config: storeConfig }));
+    let tokenStore = deps.tokenStore ?? buildTokenStore(config);
+    let token = await tokenStore.get();
+
+    if (token === undefined) {
+      io.stderr.write("No stored Termix session token found. Starting login.\n");
+      const loginExitCode = deps.loginFlow === undefined
+        ? await runLogin(["--server", config.serverUrl], io, deps)
+        : await deps.loginFlow();
+
+      if (loginExitCode !== 0) {
+        return loginExitCode;
+      }
+
+      config = await configStore.load();
+      tokenStore = deps.tokenStore ?? buildTokenStore(config);
+      token = await tokenStore.get();
+      if (token === undefined) {
+        return 0;
+      }
+    }
+
+    const hostClient = deps.hostClient ?? new TermixHostClient();
+    const hosts = sshCapableHosts(await listHostsWithOneAuthRetry({
+      config,
+      token,
+      hostClient,
+      io,
+      deps,
+      configStore,
+      buildTokenStore,
+    }));
+
+    io.stdout.write(formatHostList(hosts));
+    return 0;
+  } catch (error) {
+    io.stderr.write(`${error.message}\n`);
+    return 1;
+  }
+}
+
+async function listHostsWithOneAuthRetry({ config, token, hostClient, io, deps, configStore, buildTokenStore }) {
+  try {
+    return await hostClient.listHosts({
+      serverUrl: config.serverUrl,
+      token,
+      tls: config.tls ?? {},
+    });
+  } catch (error) {
+    if (!isAuthFailure(error)) {
+      throw error;
+    }
+
+    io.stderr.write("Stored Termix session token was rejected. Starting login.\n");
+    const loginExitCode = deps.loginFlow === undefined
+      ? await runLogin(["--server", config.serverUrl], io, deps)
+      : await deps.loginFlow();
+
+    if (loginExitCode !== 0) {
+      throw new Error("Termix host listing failed: login did not complete");
+    }
+
+    const refreshedConfig = await configStore.load();
+    const refreshedTokenStore = deps.tokenStore ?? buildTokenStore(refreshedConfig);
+    const refreshedToken = await refreshedTokenStore.get();
+
+    if (refreshedToken === undefined) {
+      return [];
+    }
+
+    return hostClient.listHosts({
+      serverUrl: refreshedConfig.serverUrl,
+      token: refreshedToken,
+      tls: refreshedConfig.tls ?? {},
+    });
+  }
+}
+
+function isAuthFailure(error) {
+  return error.statusCode === 401 || error.statusCode === 403 || /auth|unauthorized|forbidden/i.test(error.message);
 }
 
 async function resolveFinalToken({ loginResponse, authClient, prompts, serverUrl, tls }) {

@@ -62,7 +62,7 @@ The planned top-level commands are:
 - `tersh connect [host-id-or-name]`
 - `tersh logout`
 
-`tersh hosts` and `tersh connect` placeholders are intentionally user-visible and exit predictably until their implementation slices land.
+`tersh connect` is intentionally user-visible and exits predictably until its implementation slice lands.
 
 ### Login
 
@@ -91,6 +91,16 @@ tersh logout
 ```
 
 Logout removes stored token material and leaves non-secret server config intact.
+
+### Hosts
+
+```sh
+tersh hosts
+```
+
+Hosts uses the stored Termix server URL and session token to call the authenticated host list API. Output includes SSH-terminal-capable hosts visible to the user, including shared hosts, and prints identifying metadata such as name, username, host, port, folder, tags, auth type, shared status, and credential hints.
+
+Host secrets are not printed or stored locally.
 
 ## Dependencies
 
