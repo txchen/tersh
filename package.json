@@ -1,5 +1,5 @@
 {
-  "name": "tersh",
+  "name": "@txchen/tersh",
   "version": "0.1.0",
   "description": "Local terminal CLI for connecting to Termix-managed SSH hosts.",
   "type": "module",
@@ -13,6 +13,9 @@
   ],
   "engines": {
     "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "check": "node --check bin/tersh.js && node --check src/auth-client.js && node --check src/command-runner.js && node --check src/config-store.js && node --check src/host-discovery.js && node --check src/http-json.js && node --check src/prompts.js && node --check src/tls-policy.js && node --check src/token-storage.js && node --check src/tty-bridge.js",

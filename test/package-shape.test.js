@@ -13,7 +13,9 @@ describe("package shape", () => {
   it("is publishable to npm", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 
+    assert.equal(packageJson.name, "@txchen/tersh");
     assert.notEqual(packageJson.private, true);
+    assert.equal(packageJson.publishConfig.access, "public");
     assert.deepEqual(packageJson.files, ["bin/", "src/", "README.md"]);
   });
 
