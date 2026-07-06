@@ -59,10 +59,10 @@ export function formatHostList(hosts) {
     return "No SSH-capable Termix hosts found.\n";
   }
 
-  return `${hosts.map(formatHostLine).join("\n")}\n`;
+  return `${hosts.map(formatHostSummary).join("\n")}\n`;
 }
 
-function formatHostLine(host) {
+export function formatHostSummary(host) {
   return [
     host.name ?? host.id,
     `${host.username}@${host.ip}:${host.port}`,

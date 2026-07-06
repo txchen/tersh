@@ -1,6 +1,6 @@
 import { TermixAuthClient } from "./auth-client.js";
 import { JsonConfigStore } from "./config-store.js";
-import { formatHostList, hasTerminalMetadata, isSshTerminalEnabled, sanitizeHostForTerminal, sshCapableHosts, TermixHostClient } from "./host-discovery.js";
+import { formatHostList, formatHostSummary, hasTerminalMetadata, isSshTerminalEnabled, sanitizeHostForTerminal, sshCapableHosts, TermixHostClient } from "./host-discovery.js";
 import { createNodePrompts } from "./prompts.js";
 import { createTokenStore } from "./token-storage.js";
 import { normalizeServerUrl } from "./tls-policy.js";
@@ -217,11 +217,6 @@ async function runHosts(io, deps) {
 
 async function runConnect(args, io, deps) {
   try {
-    const target = args[0];
-    if (target === undefined) {
-      throw new Error("Usage: tersh connect <host-id-or-name>");
-    }
-
     const { config, token } = await loadConfigAndToken(deps);
     const hostClient = deps.hostClient ?? new TermixHostClient();
     const listedHosts = await hostClient.listHosts({
@@ -229,7 +224,15 @@ async function runConnect(args, io, deps) {
       token,
       tls: config.tls ?? {},
     });
-    const hostConfig = selectHost(listedHosts.filter(isSshTerminalEnabled), target);
+    const connectableHosts = listedHosts.filter(isSshTerminalEnabled);
+    const hostConfig = args[0] === undefined
+      ? await pickHost(connectableHosts, io, deps)
+      : selectHost(connectableHosts, args[0]);
+
+    if (hostConfig === undefined) {
+      return 130;
+    }
+
     validateTerminalHost(hostConfig);
     const sanitizedHostConfig = sanitizeHostForTerminal(hostConfig);
     const bridgeStarter = deps.startTerminalBridge ?? startTerminalBridge;
@@ -245,6 +248,33 @@ async function runConnect(args, io, deps) {
     io.stderr.write(`${error.message}\n`);
     return 1;
   }
+}
+
+async function pickHost(hosts, io, deps) {
+  const candidates = sshCapableHosts(hosts);
+
+  if (candidates.length === 0) {
+    throw new Error("No SSH-capable Termix hosts found.");
+  }
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    io.stderr.write(`${index + 1}. ${formatHostSummary(candidates[index])}\n`);
+  }
+
+  const prompts = deps.prompts ?? createNodePrompts({ stdin: io.stdin, stderr: io.stderr });
+  const answer = (await prompts.askText("Select host: ")).trim();
+
+  if (["", "q", "quit", "cancel"].includes(answer.toLowerCase())) {
+    io.stderr.write("Cancelled\n");
+    return undefined;
+  }
+
+  const index = Number.parseInt(answer, 10);
+  if (!Number.isInteger(index) || index < 1 || index > candidates.length) {
+    throw new Error(`Invalid host selection: ${answer}`);
+  }
+
+  return candidates[index - 1];
 }
 
 async function loadConfigAndToken(deps) {

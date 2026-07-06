@@ -104,4 +104,51 @@ describe("tersh connect command", () => {
     assert.equal(result.exitCode, 0);
     assert.equal(bridgeStarts[0].hostConfig.id, 2);
   });
+
+  it("prompts for a host when no connect argument is provided", async () => {
+    const { deps, bridgeStarts } = depsForConnect([
+      { id: 1, name: "dev", ip: "10.0.0.1", port: 22, username: "root", password: "secret" },
+      { id: 2, name: "prod", ip: "10.0.0.2", port: 22, username: "deploy", tags: ["api"] },
+    ]);
+    const prompts = [];
+    deps.prompts = {
+      askText: async (label) => {
+        prompts.push(label);
+        return "2";
+      },
+    };
+
+    const result = await run(["connect"], deps);
+
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(prompts, ["Select host: "]);
+    assert.match(result.stderr, /1\. dev/);
+    assert.match(result.stderr, /2\. prod/);
+    assert.doesNotMatch(result.stderr, /secret/);
+    assert.equal(bridgeStarts[0].hostConfig.id, 2);
+    assert.equal(bridgeStarts[0].hostConfig.password, undefined);
+  });
+
+  it("fails clearly when the interactive picker has no hosts", async () => {
+    const { deps, bridgeStarts } = depsForConnect([]);
+
+    const result = await run(["connect"], deps);
+
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /No SSH-capable Termix hosts found/);
+    assert.deepEqual(bridgeStarts, []);
+  });
+
+  it("exits predictably when the interactive picker is cancelled", async () => {
+    const { deps, bridgeStarts } = depsForConnect([
+      { id: 1, name: "dev", ip: "10.0.0.1", port: 22, username: "root" },
+    ]);
+    deps.prompts = { askText: async () => "q" };
+
+    const result = await run(["connect"], deps);
+
+    assert.equal(result.exitCode, 130);
+    assert.match(result.stderr, /Cancelled/);
+    assert.deepEqual(bridgeStarts, []);
+  });
 });
