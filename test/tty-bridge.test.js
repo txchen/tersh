@@ -293,6 +293,21 @@ describe("TTY bridge", () => {
     assert.equal(ws.sent.at(-1).type, "disconnect");
   });
 
+  it("treats raw Ctrl-D as local EOF after sending EOT to the remote session", async () => {
+    const { bridge, ws, stdin } = bridgeFixture();
+    const done = bridge.start();
+    ws.emit("open");
+
+    stdin.write(Buffer.from([0x04]));
+
+    assert.equal(await done, 0);
+    assert.deepEqual(ws.sent.slice(1), [
+      { type: "input", data: "\x04" },
+      { type: "disconnect" },
+    ]);
+    assert.deepEqual(stdin.rawModes, [true, false]);
+  });
+
   it("exits clearly on expired or taken-over sessions", async () => {
     const expired = bridgeFixture();
     const expiredDone = expired.bridge.start();

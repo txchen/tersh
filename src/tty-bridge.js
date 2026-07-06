@@ -5,6 +5,7 @@ import { createNodePrompts } from "./prompts.js";
 import { normalizeServerUrl, webSocketUrlForServer } from "./tls-policy.js";
 
 const webSocketOpenReadyState = 1;
+const ctrlD = "\x04";
 const secretPromptMessages = {
   password_required: {
     labelFor: (message) => message.prompt ?? "Password: ",
@@ -135,6 +136,9 @@ export class TermixTtyBridge {
 
     const data = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
     this.send({ type: "input", data });
+    if (data === ctrlD) {
+      this.finish(0);
+    }
   }
 
   resize(cols = this.stdout.columns || this.cols, rows = this.stdout.rows || this.rows) {
