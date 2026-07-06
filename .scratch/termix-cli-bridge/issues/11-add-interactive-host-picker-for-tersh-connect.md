@@ -1,6 +1,6 @@
 # Add Interactive Host Picker For `tersh connect`
 
-Status: ready-for-agent
+Status: resolved
 
 ## Parent
 

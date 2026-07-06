@@ -1,6 +1,6 @@
 # Scaffold Installable `tersh` CLI
 
-Status: ready-for-agent
+Status: resolved
 
 ## Parent
 

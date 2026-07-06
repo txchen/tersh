@@ -1,6 +1,6 @@
 # Implement Login, Logout, Config, And Token Storage
 
-Status: ready-for-agent
+Status: resolved
 
 ## Parent
 

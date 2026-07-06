@@ -1,6 +1,6 @@
 # Connect Directly To A Host With The Core TTY Bridge
 
-Status: ready-for-agent
+Status: resolved
 
 ## Parent
 

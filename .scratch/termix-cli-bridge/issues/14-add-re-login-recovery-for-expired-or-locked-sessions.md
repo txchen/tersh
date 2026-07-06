@@ -1,6 +1,6 @@
 # Add Re-Login Recovery For Expired Or Locked Sessions
 
-Status: ready-for-agent
+Status: resolved
 
 ## Parent
 

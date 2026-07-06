@@ -1,6 +1,6 @@
 # Document Manual Live-Server Smoke Testing
 
-Status: ready-for-agent
+Status: resolved
 
 ## Parent
 

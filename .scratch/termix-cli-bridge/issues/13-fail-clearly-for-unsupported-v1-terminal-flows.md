@@ -1,6 +1,6 @@
 # Fail Clearly For Unsupported V1 Terminal Flows
 
-Status: ready-for-agent
+Status: resolved
 
 ## Parent
 

@@ -1,6 +1,6 @@
 # Handle Supported Interactive Terminal Prompts
 
-Status: ready-for-agent
+Status: resolved
 
 ## Parent
 
