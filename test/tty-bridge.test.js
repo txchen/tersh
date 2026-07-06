@@ -55,8 +55,14 @@ function bridgeFixture(overrides = {}) {
   const ws = new FakeWebSocket();
   const stdin = new PassThrough();
   stdin.rawModes = [];
+  stdin.pauseCalls = 0;
   stdin.isTTY = true;
   stdin.setRawMode = (enabled) => stdin.rawModes.push(enabled);
+  const originalPause = stdin.pause.bind(stdin);
+  stdin.pause = () => {
+    stdin.pauseCalls += 1;
+    return originalPause();
+  };
   const stdout = new CaptureWritable();
   const stderr = new CaptureWritable();
   const bridge = new TermixTtyBridge({
@@ -306,6 +312,7 @@ describe("TTY bridge", () => {
       { type: "disconnect" },
     ]);
     assert.deepEqual(stdin.rawModes, [true, false]);
+    assert.equal(stdin.pauseCalls, 1);
   });
 
   it("exits clearly on expired or taken-over sessions", async () => {

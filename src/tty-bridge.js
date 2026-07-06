@@ -376,6 +376,7 @@ export class TermixTtyBridge {
     clearInterval(this.pingTimer);
     this.stdin.off?.("data", this.handleInput);
     this.stdin.off?.("end", this.handleLocalEnd);
+    this.stdin.pause?.();
     this.signalTarget.off?.("SIGWINCH", this.handleResize);
     this.signalTarget.off?.("SIGINT", this.handleInterrupt);
     this.signalTarget.off?.("SIGTERM", this.handleInterrupt);
