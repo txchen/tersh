@@ -51,7 +51,7 @@ class CaptureWritable extends Writable {
   }
 }
 
-function bridgeFixture() {
+function bridgeFixture(overrides = {}) {
   const ws = new FakeWebSocket();
   const stdin = new PassThrough();
   stdin.rawModes = [];
@@ -76,9 +76,26 @@ function bridgeFixture() {
     cols: 100,
     rows: 40,
     pingIntervalMs: 0,
+    ...overrides,
   });
 
   return { bridge, ws, stdin, stdout, stderr };
+}
+
+function promptBridgeFixture(promptAnswers) {
+  const prompts = [];
+  const answerPrompt = async (label) => {
+    prompts.push(label);
+    return promptAnswers.shift();
+  };
+  const { bridge, ws, stdin, stdout, stderr } = bridgeFixture({
+    prompts: {
+      askSecret: answerPrompt,
+      askText: answerPrompt,
+    },
+  });
+
+  return { bridge, ws, stdin, stdout, stderr, prompts };
 }
 
 function signalTargetFixture() {
@@ -90,6 +107,18 @@ function signalTargetFixture() {
     return originalOff(event, handler);
   };
   return target;
+}
+
+function flushImmediate() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
 }
 
 describe("TTY bridge", () => {
@@ -289,5 +318,161 @@ describe("TTY bridge", () => {
 
     assert.equal(stdout.output, "hello");
     assert.equal(await done, 0);
+  });
+
+  it("handles password prompts without forwarding secrets to the PTY or stdout", async () => {
+    const { bridge, ws, stdin, stdout, prompts } = promptBridgeFixture(["ssh-password"]);
+    bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({ type: "password_required", prompt: "Password:" });
+    stdin.write("during-prompt\r");
+
+    await flushImmediate();
+    stdin.write("after-prompt\r");
+
+    assert.deepEqual(prompts, ["Password:"]);
+    assert.deepEqual(ws.sent.slice(1), [
+      { type: "password_response", data: { code: "ssh-password" } },
+      { type: "input", data: "after-prompt\r" },
+    ]);
+    assert.equal(stdout.output, "");
+    assert.deepEqual(stdin.rawModes, [true, false, true]);
+  });
+
+  it("writes default secret prompts to stderr without echoing secrets", async () => {
+    const { bridge, ws, stdin, stdout, stderr } = bridgeFixture();
+    bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({ type: "password_required", prompt: "Password: " });
+    setImmediate(() => stdin.write("ssh-password\n"));
+
+    await flushImmediate();
+
+    assert.match(stderr.output, /Password: /);
+    assert.doesNotMatch(stderr.output, /ssh-password/);
+    assert.equal(stdout.output, "");
+    assert.deepEqual(ws.sent.slice(1), [{ type: "password_response", data: { code: "ssh-password" } }]);
+
+    bridge.finish(0);
+  });
+
+  it("handles TOTP prompts and retries with hidden input", async () => {
+    const { bridge, ws, stdin, stdout, prompts } = promptBridgeFixture(["123456", "654321"]);
+    bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({ type: "totp_required", prompt: "TOTP:" });
+    await flushImmediate();
+    ws.serverMessage({ type: "totp_retry", prompt: "Try again:" });
+    await flushImmediate();
+    stdin.write("after-totp\r");
+
+    assert.deepEqual(prompts, ["TOTP:", "Invalid TOTP. Try again:"]);
+    assert.deepEqual(ws.sent.slice(1), [
+      { type: "totp_response", data: { code: "123456" } },
+      { type: "totp_response", data: { code: "654321" } },
+      { type: "input", data: "after-totp\r" },
+    ]);
+    assert.equal(stdout.output, "");
+    assert.deepEqual(stdin.rawModes, [true, false, true, false, true]);
+  });
+
+  it("keeps raw forwarding paused until overlapping prompts drain", async () => {
+    const first = deferred();
+    const second = deferred();
+    const prompts = [];
+    const { bridge, ws, stdin } = bridgeFixture({
+      prompts: {
+        askSecret: async (label) => {
+          prompts.push(label);
+          return prompts.length === 1 ? first.promise : second.promise;
+        },
+      },
+    });
+    bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({ type: "password_required", prompt: "Password:" });
+    ws.serverMessage({ type: "totp_required", prompt: "TOTP:" });
+    await flushImmediate();
+    stdin.write("during-first\r");
+
+    first.resolve("ssh-password");
+    await flushImmediate();
+    stdin.write("during-second\r");
+
+    second.resolve("123456");
+    await flushImmediate();
+    stdin.write("after-prompts\r");
+
+    assert.deepEqual(prompts, ["Password:", "TOTP:"]);
+    assert.deepEqual(ws.sent.slice(1), [
+      { type: "password_response", data: { code: "ssh-password" } },
+      { type: "totp_response", data: { code: "123456" } },
+      { type: "input", data: "after-prompts\r" },
+    ]);
+    assert.deepEqual(stdin.rawModes, [true, false, true]);
+  });
+
+  it("handles host key verification and changed-key rejection defaults", async () => {
+    const explicit = promptBridgeFixture(["maybe", "reject"]);
+    explicit.bridge.start();
+    explicit.ws.emit("open");
+    explicit.ws.serverMessage({
+      type: "host_key_verification_required",
+      data: { host: "example.com", fingerprint: "SHA256:abc" },
+    });
+    await flushImmediate();
+
+    assert.match(explicit.stderr.output, /SHA256:abc/);
+    assert.match(explicit.stderr.output, /Please type accept or reject/);
+    assert.deepEqual(explicit.ws.sent.at(-1), { type: "host_key_verification_response", data: { action: "reject" } });
+    assert.equal(explicit.stdout.output, "");
+    assert.deepEqual(explicit.stdin.rawModes, [true, false, true]);
+
+    const rejected = promptBridgeFixture([""]);
+    rejected.bridge.start();
+    rejected.ws.emit("open");
+    rejected.ws.serverMessage({
+      type: "host_key_changed",
+      data: { host: "example.com", fingerprint: "SHA256:def" },
+    });
+    await flushImmediate();
+
+    assert.match(rejected.stderr.output, /WARNING/);
+    assert.deepEqual(rejected.ws.sent.at(-1), { type: "host_key_verification_response", data: { action: "reject" } });
+    assert.equal(rejected.stdout.output, "");
+    assert.deepEqual(rejected.stdin.rawModes, [true, false, true]);
+  });
+
+  it("handles encrypted key passphrase prompts without persisting the passphrase", async () => {
+    const { bridge, ws, stdin, stdout, prompts } = promptBridgeFixture(["key-passphrase"]);
+    bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({ type: "passphrase_required", prompt: "Key passphrase:" });
+    await flushImmediate();
+
+    assert.deepEqual(prompts, ["Key passphrase:"]);
+    assert.deepEqual(ws.sent.at(-1), {
+      type: "reconnect_with_credentials",
+      data: {
+        keyPassword: "key-passphrase",
+        cols: 100,
+        rows: 40,
+        hostConfig: {
+          id: 123,
+          name: "prod",
+          ip: "10.0.0.10",
+          port: 22,
+          username: "deploy",
+          authType: "credential",
+        },
+      },
+    });
+    assert.equal(stdout.output, "");
+    assert.deepEqual(stdin.rawModes, [true, false, true]);
   });
 });

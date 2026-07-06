@@ -1,9 +1,24 @@
 import { EventEmitter } from "node:events";
 
 import { sanitizeHostForTerminal } from "./host-discovery.js";
+import { createNodePrompts } from "./prompts.js";
 import { normalizeServerUrl, webSocketUrlForServer } from "./tls-policy.js";
 
 const webSocketOpenReadyState = 1;
+const secretPromptMessages = {
+  password_required: {
+    labelFor: (message) => message.prompt ?? "Password: ",
+    responseType: "password_response",
+  },
+  totp_required: {
+    labelFor: (message) => message.prompt ?? "TOTP or backup code: ",
+    responseType: "totp_response",
+  },
+  totp_retry: {
+    labelFor: (message) => `Invalid TOTP. ${message.prompt ?? "Try again: "}`,
+    responseType: "totp_response",
+  },
+};
 
 export function terminalWebSocketUrl(serverUrl, token) {
   const url = new URL(webSocketUrlForServer(normalizeServerUrl(serverUrl), "/ssh/websocket/"));
@@ -22,6 +37,7 @@ export class TermixTtyBridge {
     rows = stdout.rows || 24,
     pingIntervalMs = 30000,
     signalTarget = process,
+    prompts = createNodePrompts({ stdin, stderr }),
   }) {
     this.ws = ws;
     this.hostConfig = sanitizeHostForTerminal(hostConfig);
@@ -32,8 +48,12 @@ export class TermixTtyBridge {
     this.rows = rows;
     this.pingIntervalMs = pingIntervalMs;
     this.signalTarget = signalTarget;
+    this.prompts = prompts;
     this.sessionId = undefined;
     this.closed = false;
+    this.forwardingPaused = false;
+    this.pendingPrompts = 0;
+    this.promptQueue = Promise.resolve();
     this.rawModeWasSet = false;
     this.exitCode = 0;
     this.done = new Promise((resolve) => {
@@ -94,7 +114,7 @@ export class TermixTtyBridge {
   }
 
   handleInput(chunk) {
-    if (this.closed || !isOpen(this.ws)) {
+    if (this.closed || this.forwardingPaused || !isOpen(this.ws)) {
       return;
     }
 
@@ -160,6 +180,20 @@ export class TermixTtyBridge {
       case "resized":
       case "pong":
         break;
+      case "password_required":
+      case "totp_required":
+      case "totp_retry":
+        void this.handleSecretPrompt(message, secretPromptMessages[message.type]);
+        break;
+      case "host_key_verification_required":
+        void this.handleHostKeyPrompt(message, { changed: false });
+        break;
+      case "host_key_changed":
+        void this.handleHostKeyPrompt(message, { changed: true });
+        break;
+      case "passphrase_required":
+        void this.handlePassphrasePrompt(message);
+        break;
       case "error":
         this.stderr.write(`[termix:error] ${message.message ?? "unknown error"}\n`);
         this.finish(1);
@@ -196,6 +230,96 @@ export class TermixTtyBridge {
 
   send(message) {
     this.ws.send(JSON.stringify(message));
+  }
+
+  async handleSecretPrompt(message, { labelFor, responseType }) {
+    await this.withPausedForwarding(async () => {
+      const secret = await this.prompts.askSecret(labelFor(message));
+      this.send({ type: responseType, data: { code: secret } });
+    });
+  }
+
+  async handleHostKeyPrompt(message, { changed }) {
+    await this.withPausedForwarding(async () => {
+      const data = message.data ?? {};
+      const details = [
+        changed ? "WARNING: host key changed." : "Host key verification required.",
+        data.host ? `Host: ${data.host}` : undefined,
+        data.fingerprint ? `Fingerprint: ${data.fingerprint}` : undefined,
+        data.keyType ? `Key type: ${data.keyType}` : undefined,
+      ].filter(Boolean).join("\n");
+      this.stderr.write(`${details}\n`);
+      const action = await this.askHostKeyAction({ changed });
+      this.send({ type: "host_key_verification_response", data: { action } });
+    });
+  }
+
+  async askHostKeyAction({ changed }) {
+    const answer = (await this.prompts.askText(changed ? "Type accept to continue: " : "Accept host key? (accept/reject): ")).trim().toLowerCase();
+    if (answer === "accept") {
+      return "accept";
+    }
+    if (changed || answer === "reject") {
+      return "reject";
+    }
+
+    this.stderr.write("Please type accept or reject.\n");
+    return this.askHostKeyAction({ changed });
+  }
+
+  async handlePassphrasePrompt(message) {
+    await this.withPausedForwarding(async () => {
+      const keyPassword = await this.prompts.askSecret(message.prompt ?? "SSH key passphrase: ");
+      this.send({
+        type: "reconnect_with_credentials",
+        data: {
+          keyPassword,
+          cols: this.cols,
+          rows: this.rows,
+          hostConfig: this.hostConfig,
+        },
+      });
+    });
+  }
+
+  async withPausedForwarding(action) {
+    this.pendingPrompts += 1;
+    if (this.pendingPrompts === 1) {
+      this.pauseForwarding();
+    }
+
+    const promptRun = this.promptQueue.then(action);
+    this.promptQueue = promptRun.catch(() => {});
+
+    try {
+      await promptRun;
+    } catch (error) {
+      this.stderr.write(`[termix:error] ${error?.message ?? String(error)}\n`);
+      this.finish(1);
+    } finally {
+      this.pendingPrompts -= 1;
+      if (this.pendingPrompts === 0) {
+        this.resumeForwarding();
+      }
+    }
+  }
+
+  pauseForwarding() {
+    this.forwardingPaused = true;
+    if (this.rawModeWasSet) {
+      this.stdin.setRawMode(false);
+      this.rawModeWasSet = false;
+    }
+  }
+
+  resumeForwarding() {
+    if (!this.closed) {
+      if (this.stdin.isTTY && typeof this.stdin.setRawMode === "function") {
+        this.stdin.setRawMode(true);
+        this.rawModeWasSet = true;
+      }
+    }
+    this.forwardingPaused = false;
   }
 
   finish(code) {
