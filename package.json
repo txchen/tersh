@@ -1,6 +1,6 @@
 {
   "name": "tersh",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Local terminal CLI for connecting to Termix-managed SSH hosts.",
   "type": "module",
