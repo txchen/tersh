@@ -19,6 +19,19 @@ const secretPromptMessages = {
     responseType: "totp_response",
   },
 };
+const browserAuthFlows = {
+  warpgate_auth_required: "Warpgate",
+  opkssh_auth_required: "OPKSSH",
+  opkssh_status: "OPKSSH",
+  opkssh_completed: "OPKSSH",
+  opkssh_error: "OPKSSH",
+  opkssh_timeout: "OPKSSH",
+  opkssh_config_error: "OPKSSH",
+  vault_auth_required: "Vault",
+  vault_auth_url: "Vault",
+  vault_completed: "Vault",
+  vault_error: "Vault",
+};
 
 export function terminalWebSocketUrl(serverUrl, token) {
   const url = new URL(webSocketUrlForServer(normalizeServerUrl(serverUrl), "/ssh/websocket/"));
@@ -194,6 +207,12 @@ export class TermixTtyBridge {
       case "passphrase_required":
         void this.handlePassphrasePrompt(message);
         break;
+      case "auth_method_not_available":
+        this.failUnsupportedFlow("manual credential fallback is not supported in tersh v1; configure Termix-managed credentials for this host and reconnect");
+        break;
+      case "tmux_sessions_available":
+        this.failUnsupportedFlow("auto-tmux session selection is not supported in tersh v1; disable Termix auto-tmux for this host or connect normally and run tmux attach manually");
+        break;
       case "error":
         this.stderr.write(`[termix:error] ${message.message ?? "unknown error"}\n`);
         this.finish(1);
@@ -214,6 +233,11 @@ export class TermixTtyBridge {
         this.finish(Number.isInteger(message.code) ? message.code : 0);
         break;
       default:
+        if (browserAuthFlows[message.type]) {
+          this.failUnsupportedFlow(`${browserAuthFlows[message.type]} browser authentication is not supported in tersh v1; use the Termix web terminal for this host`);
+          break;
+        }
+
         this.stderr.write(`[termix] unhandled message type: ${message.type}\n`);
         break;
     }
@@ -230,6 +254,11 @@ export class TermixTtyBridge {
 
   send(message) {
     this.ws.send(JSON.stringify(message));
+  }
+
+  failUnsupportedFlow(message) {
+    this.stderr.write(`[termix] ${message}\n`);
+    this.finish(1);
   }
 
   async handleSecretPrompt(message, { labelFor, responseType }) {

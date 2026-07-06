@@ -121,6 +121,12 @@ function deferred() {
   return { promise, resolve };
 }
 
+function assertCleanShutdown({ stdin, ws }) {
+  assert.deepEqual(stdin.rawModes, [true, false]);
+  assert.equal(ws.sent.at(-1).type, "disconnect");
+  assert.deepEqual(ws.closedWith, { code: 1000, reason: "client finished" });
+}
+
 describe("TTY bridge", () => {
   it("builds the authenticated Terminal transport URL", () => {
     assert.equal(
@@ -238,6 +244,7 @@ describe("TTY bridge", () => {
 
     assert.equal(await expiredDone, 1);
     assert.match(expired.stderr.output, /expired/);
+    assertCleanShutdown(expired);
 
     const takenOver = bridgeFixture();
     const takenOverDone = takenOver.bridge.start();
@@ -246,6 +253,73 @@ describe("TTY bridge", () => {
 
     assert.equal(await takenOverDone, 1);
     assert.match(takenOver.stderr.output, /taken over/);
+    assertCleanShutdown(takenOver);
+  });
+
+  it("fails clearly for unsupported manual credential fallback without collecting credentials", async () => {
+    const { bridge, ws, stdin, stderr } = bridgeFixture({
+      prompts: {
+        askSecret: async () => {
+          throw new Error("must not prompt");
+        },
+        askText: async () => {
+          throw new Error("must not prompt");
+        },
+      },
+    });
+    const done = bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({ type: "auth_method_not_available" });
+
+    assert.equal(await done, 1);
+    assert.match(stderr.output, /manual credential fallback/i);
+    assert.match(stderr.output, /not supported/i);
+    assertCleanShutdown({ stdin, ws });
+  });
+
+  it("fails clearly for unsupported browser authentication flows", async () => {
+    const browserMessages = [
+      ["warpgate_auth_required", /Warpgate/i],
+      ["opkssh_auth_required", /OPKSSH/i],
+      ["opkssh_status", /OPKSSH/i],
+      ["opkssh_completed", /OPKSSH/i],
+      ["opkssh_error", /OPKSSH/i],
+      ["opkssh_timeout", /OPKSSH/i],
+      ["opkssh_config_error", /OPKSSH/i],
+      ["vault_auth_required", /Vault/i],
+      ["vault_auth_url", /Vault/i],
+      ["vault_completed", /Vault/i],
+      ["vault_error", /Vault/i],
+    ];
+
+    for (const [type, flowName] of browserMessages) {
+      const { bridge, ws, stdin, stderr } = bridgeFixture();
+      const done = bridge.start();
+      ws.emit("open");
+
+      ws.serverMessage({ type });
+
+      assert.equal(await done, 1, type);
+      assert.match(stderr.output, flowName, type);
+      assert.match(stderr.output, /browser authentication/i, type);
+      assert.match(stderr.output, /not supported/i, type);
+      assertCleanShutdown({ stdin, ws });
+    }
+  });
+
+  it("fails clearly for unsupported tmux session selection with manual guidance", async () => {
+    const { bridge, ws, stdin, stderr } = bridgeFixture();
+    const done = bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({ type: "tmux_sessions_available", data: { sessions: ["main"] } });
+
+    assert.equal(await done, 1);
+    assert.match(stderr.output, /auto-tmux/i);
+    assert.match(stderr.output, /disable/i);
+    assert.match(stderr.output, /tmux attach/i);
+    assertCleanShutdown({ stdin, ws });
   });
 
   it("returns nonzero on abnormal WebSocket close", async () => {
