@@ -172,42 +172,20 @@ async function runLogout(io, deps) {
 
 async function runHosts(io, deps) {
   try {
-    const configStore = deps.configStore ?? new JsonConfigStore();
-    let config = await configStore.load();
-    const buildTokenStore = deps.createTokenStore ?? ((storeConfig) => createTokenStore({ config: storeConfig }));
-    let tokenStore = deps.tokenStore ?? buildTokenStore(config);
-    let token = await tokenStore.get();
-
-    if (token === undefined) {
-      io.stderr.write("No stored Termix session token found. Starting login.\n");
-      const loginExitCode = deps.loginFlow === undefined
-        ? await runLogin(["--server", config.serverUrl], io, deps)
-        : await deps.loginFlow();
-
-      if (loginExitCode !== 0) {
-        return loginExitCode;
-      }
-
-      config = await configStore.load();
-      tokenStore = deps.tokenStore ?? buildTokenStore(config);
-      token = await tokenStore.get();
-      if (token === undefined) {
-        return 0;
-      }
-    }
+    const sessionStore = createSessionStore(deps);
+    const { config, token } = await loadConfigAndTokenWithLogin({ io, deps, sessionStore });
 
     const hostClient = deps.hostClient ?? new TermixHostClient();
-    const hosts = sshCapableHosts(await listHostsWithOneAuthRetry({
+    const { hosts } = await listHostsWithOneAuthRetry({
       config,
       token,
       hostClient,
       io,
       deps,
-      configStore,
-      buildTokenStore,
-    }));
+      sessionStore,
+    });
 
-    io.stdout.write(formatHostList(hosts));
+    io.stdout.write(formatHostList(sshCapableHosts(hosts)));
     return 0;
   } catch (error) {
     io.stderr.write(`${error.message}\n`);
@@ -217,13 +195,19 @@ async function runHosts(io, deps) {
 
 async function runConnect(args, io, deps) {
   try {
-    const { config, token } = await loadConfigAndToken(deps);
+    const sessionStore = createSessionStore(deps);
+    let { config, token } = await loadConfigAndTokenWithLogin({ io, deps, sessionStore });
     const hostClient = deps.hostClient ?? new TermixHostClient();
-    const listedHosts = await hostClient.listHosts({
-      serverUrl: config.serverUrl,
+    const hostListing = await listHostsWithOneAuthRetry({
+      config,
       token,
-      tls: config.tls ?? {},
+      hostClient,
+      io,
+      deps,
+      sessionStore,
     });
+    ({ config, token } = hostListing);
+    const listedHosts = hostListing.hosts;
     const connectableHosts = listedHosts.filter(isSshTerminalEnabled);
     const hostConfig = args[0] === undefined
       ? await pickHost(connectableHosts, io, deps)
@@ -235,19 +219,60 @@ async function runConnect(args, io, deps) {
 
     validateTerminalHost(hostConfig);
     const sanitizedHostConfig = sanitizeHostForTerminal(hostConfig);
-    const bridgeStarter = deps.startTerminalBridge ?? startTerminalBridge;
-
-    return await bridgeStarter({
-      webSocketUrl: terminalWebSocketUrl(config.serverUrl, token),
+    let bridgeResult = await connectHostWithBridge({
+      config,
+      token,
       hostConfig: sanitizedHostConfig,
-      stdin: io.stdin,
-      stdout: io.stdout,
-      stderr: io.stderr,
+      io,
+      deps,
     });
+
+    if (!isRecoverableBridgeResult(bridgeResult)) {
+      return bridgeExitCode(bridgeResult);
+    }
+
+    io.stderr.write("Termix terminal session requires login recovery. Starting login.\n");
+    const loginExitCode = await runLoginFlow({ config, io, deps });
+    if (loginExitCode !== 0) {
+      io.stderr.write("Termix terminal recovery failed: login did not complete.\n");
+      return loginExitCode;
+    }
+
+    ({ config, token } = await createSessionStore(deps).load());
+    if (token === undefined) {
+      io.stderr.write("Termix terminal recovery failed: login did not store a session token.\n");
+      return 1;
+    }
+
+    bridgeResult = await connectHostWithBridge({
+      config,
+      token,
+      hostConfig: sanitizedHostConfig,
+      io,
+      deps,
+    });
+
+    if (isRecoverableBridgeResult(bridgeResult)) {
+      io.stderr.write("Termix terminal session still requires login recovery after retry.\n");
+      return 1;
+    }
+
+    return bridgeExitCode(bridgeResult);
   } catch (error) {
     io.stderr.write(`${error.message}\n`);
     return 1;
   }
+}
+
+async function connectHostWithBridge({ config, token, hostConfig, io, deps }) {
+  const bridgeStarter = deps.startTerminalBridge ?? startTerminalBridge;
+  return bridgeStarter({
+    webSocketUrl: terminalWebSocketUrl(config.serverUrl, token),
+    hostConfig,
+    stdin: io.stdin,
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
 }
 
 async function pickHost(hosts, io, deps) {
@@ -278,13 +303,31 @@ async function pickHost(hosts, io, deps) {
 }
 
 async function loadConfigAndToken(deps) {
-  const configStore = deps.configStore ?? new JsonConfigStore();
-  const config = await configStore.load();
-  const tokenStore = deps.tokenStore ?? createTokenStore({ config });
-  const token = await tokenStore.get();
+  const { config, token } = await createSessionStore(deps).load();
 
   if (token === undefined) {
     throw new Error("No stored Termix session token found. Run tersh login first.");
+  }
+
+  return { config, token };
+}
+
+async function loadConfigAndTokenWithLogin({ io, deps, sessionStore = createSessionStore(deps) }) {
+  let { config, token } = await sessionStore.load();
+
+  if (token !== undefined) {
+    return { config, token };
+  }
+
+  io.stderr.write("No stored Termix session token found. Starting login.\n");
+  const loginExitCode = await runLoginFlow({ config, io, deps });
+  if (loginExitCode !== 0) {
+    throw new Error("Termix login did not complete");
+  }
+
+  ({ config, token } = await sessionStore.load());
+  if (token === undefined) {
+    throw new Error("Termix login did not store a session token");
   }
 
   return { config, token };
@@ -315,41 +358,73 @@ function validateTerminalHost(host) {
   }
 }
 
-async function listHostsWithOneAuthRetry({ config, token, hostClient, io, deps, configStore, buildTokenStore }) {
+async function listHostsWithOneAuthRetry({ config, token, hostClient, io, deps, sessionStore = createSessionStore(deps) }) {
   try {
-    return await hostClient.listHosts({
-      serverUrl: config.serverUrl,
-      token,
-      tls: config.tls ?? {},
-    });
+    const hosts = await listHostsForSession({ hostClient, config, token });
+    return { hosts, config, token };
   } catch (error) {
     if (!isAuthFailure(error)) {
       throw error;
     }
 
     io.stderr.write("Stored Termix session token was rejected. Starting login.\n");
-    const loginExitCode = deps.loginFlow === undefined
-      ? await runLogin(["--server", config.serverUrl], io, deps)
-      : await deps.loginFlow();
+    const loginExitCode = await runLoginFlow({ config, io, deps });
 
     if (loginExitCode !== 0) {
       throw new Error("Termix host listing failed: login did not complete");
     }
 
-    const refreshedConfig = await configStore.load();
-    const refreshedTokenStore = deps.tokenStore ?? buildTokenStore(refreshedConfig);
-    const refreshedToken = await refreshedTokenStore.get();
+    const { config: refreshedConfig, token: refreshedToken } = await sessionStore.load();
 
     if (refreshedToken === undefined) {
-      return [];
+      throw new Error("Termix host listing recovery failed: login did not store a session token");
     }
 
-    return hostClient.listHosts({
-      serverUrl: refreshedConfig.serverUrl,
-      token: refreshedToken,
-      tls: refreshedConfig.tls ?? {},
-    });
+    try {
+      const hosts = await listHostsForSession({ hostClient, config: refreshedConfig, token: refreshedToken });
+      return { hosts, config: refreshedConfig, token: refreshedToken };
+    } catch (retryError) {
+      if (isAuthFailure(retryError)) {
+        throw new Error("Termix host listing still requires login recovery after retry");
+      }
+      throw retryError;
+    }
   }
+}
+
+async function listHostsForSession({ hostClient, config, token }) {
+  return hostClient.listHosts({
+    serverUrl: config.serverUrl,
+    token,
+    tls: config.tls ?? {},
+  });
+}
+
+async function runLoginFlow({ config, io, deps }) {
+  return deps.loginFlow === undefined
+    ? runLogin(["--server", config.serverUrl], io, deps)
+    : deps.loginFlow();
+}
+
+function bridgeExitCode(result) {
+  return typeof result === "number" ? result : result.exitCode ?? 1;
+}
+
+function isRecoverableBridgeResult(result) {
+  return result?.recoverableAuthFailure === true;
+}
+
+function createSessionStore(deps) {
+  const configStore = deps.configStore ?? new JsonConfigStore();
+  const buildTokenStore = deps.createTokenStore ?? ((storeConfig) => createTokenStore({ config: storeConfig }));
+
+  return {
+    async load() {
+      const config = await configStore.load();
+      const tokenStore = deps.tokenStore ?? buildTokenStore(config);
+      return { config, token: await tokenStore.get() };
+    },
+  };
 }
 
 function isAuthFailure(error) {

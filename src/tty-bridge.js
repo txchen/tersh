@@ -32,6 +32,8 @@ const browserAuthFlows = {
   vault_completed: "Vault",
   vault_error: "Vault",
 };
+const loginRecoveryErrorCodes = new Set(["DATA_LOCKED", "DATA_EXPIRED"]);
+const webSocketPolicyViolationCloseCode = 1008;
 
 export function terminalWebSocketUrl(serverUrl, token) {
   const url = new URL(webSocketUrlForServer(normalizeServerUrl(serverUrl), "/ssh/websocket/"));
@@ -215,7 +217,11 @@ export class TermixTtyBridge {
         break;
       case "error":
         this.stderr.write(`[termix:error] ${message.message ?? "unknown error"}\n`);
-        this.finish(1);
+        if (isRecoverableTerminalFailure(message)) {
+          this.finish(recoverableTerminalFailureResult(message.code ?? message.message ?? "terminal auth failure"));
+        } else {
+          this.finish(1);
+        }
         break;
       case "disconnected":
         this.stderr.write(`[termix] ${message.message ?? "disconnected"}\n`);
@@ -244,6 +250,11 @@ export class TermixTtyBridge {
   }
 
   handleClose(event = {}) {
+    if (event.code === webSocketPolicyViolationCloseCode || isRecoverableTerminalFailure(event)) {
+      this.finish(recoverableTerminalFailureResult(event.reason ?? "terminal auth failure"));
+      return;
+    }
+
     this.finish(event.code && event.code !== 1000 ? 1 : this.exitCode);
   }
 
@@ -409,4 +420,17 @@ function addListener(target, event, handler) {
 
 function isOpen(ws) {
   return ws.readyState === webSocketOpenReadyState || ws.readyState === ws.constructor?.OPEN;
+}
+
+function isRecoverableTerminalFailure(message) {
+  return loginRecoveryErrorCodes.has(message.code)
+    || /authentication required|data locked|data access required|data access expired|data expired/i.test(message.message ?? message.reason ?? "");
+}
+
+function recoverableTerminalFailureResult(reason) {
+  return {
+    exitCode: 1,
+    recoverableAuthFailure: true,
+    reason,
+  };
 }

@@ -192,11 +192,68 @@ describe("TTY bridge", () => {
     const done = bridge.start();
     ws.emit("open");
 
-    ws.serverMessage({ type: "error", message: "DATA_LOCKED", code: "DATA_LOCKED" });
+    ws.serverMessage({ type: "error", message: "BROKEN", code: "BROKEN" });
 
     assert.equal(await done, 1);
     assert.deepEqual(stdin.rawModes, [true, false]);
-    assert.match(stderr.output, /DATA_LOCKED/);
+    assert.match(stderr.output, /BROKEN/);
+  });
+
+  it("classifies terminal auth and data-lock failures after restoring raw mode", async () => {
+    const locked = bridgeFixture();
+    const lockedDone = locked.bridge.start();
+    locked.ws.emit("open");
+    locked.ws.serverMessage({ type: "error", message: "Data locked", code: "DATA_LOCKED" });
+
+    assert.deepEqual(await lockedDone, { exitCode: 1, recoverableAuthFailure: true, reason: "DATA_LOCKED" });
+    assert.deepEqual(locked.stdin.rawModes, [true, false]);
+
+    const expired = bridgeFixture();
+    const expiredDone = expired.bridge.start();
+    expired.ws.emit("open");
+    expired.ws.serverMessage({ type: "error", message: "Data expired", code: "DATA_EXPIRED" });
+
+    assert.deepEqual(await expiredDone, { exitCode: 1, recoverableAuthFailure: true, reason: "DATA_EXPIRED" });
+    assert.deepEqual(expired.stdin.rawModes, [true, false]);
+
+    const closed = bridgeFixture();
+    const closedDone = closed.bridge.start();
+    closed.ws.emit("open");
+    closed.ws.readyState = FakeWebSocket.CLOSED;
+    closed.ws.emit("close", { code: 1008, reason: "Authentication required" });
+
+    assert.deepEqual(await closedDone, { exitCode: 1, recoverableAuthFailure: true, reason: "Authentication required" });
+    assert.deepEqual(closed.stdin.rawModes, [true, false]);
+  });
+
+  it("does not classify remote SSH authentication failures as Termix login recovery", async () => {
+    const { bridge, ws, stdin, stderr } = bridgeFixture();
+    const done = bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({
+      type: "error",
+      message: "SSH error: Authentication failed. Please check your username and password/key.",
+    });
+
+    assert.equal(await done, 1);
+    assert.match(stderr.output, /SSH error: Authentication failed/);
+    assert.deepEqual(stdin.rawModes, [true, false]);
+  });
+
+  it("does not classify unrelated unauthorized terminal errors as Termix login recovery", async () => {
+    const { bridge, ws, stdin, stderr } = bridgeFixture();
+    const done = bridge.start();
+    ws.emit("open");
+
+    ws.serverMessage({
+      type: "error",
+      message: "Proxy denied: unauthorized host access",
+    });
+
+    assert.equal(await done, 1);
+    assert.match(stderr.output, /unauthorized host access/);
+    assert.deepEqual(stdin.rawModes, [true, false]);
   });
 
   it("cleans up on interrupt", async () => {
@@ -327,7 +384,7 @@ describe("TTY bridge", () => {
     const done = bridge.start();
     ws.emit("open");
     ws.readyState = FakeWebSocket.CLOSED;
-    ws.emit("close", { code: 1008 });
+    ws.emit("close", { code: 1011 });
 
     assert.equal(await done, 1);
     assert.deepEqual(stdin.rawModes, [true, false]);

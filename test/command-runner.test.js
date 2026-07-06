@@ -145,9 +145,13 @@ describe("tersh command runner", () => {
 
   it("prompts login when hosts has no stored token", async () => {
     const loginCalls = [];
+    const tokenStores = [
+      { get: async () => undefined },
+      { get: async () => "fresh.jwt" },
+    ];
     const result = await run(["hosts"], {
       configStore: { load: async () => ({ serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } }) },
-      tokenStore: { get: async () => undefined },
+      createTokenStore: () => tokenStores.shift(),
       loginFlow: async () => {
         loginCalls.push("login");
         return 0;
@@ -188,6 +192,26 @@ describe("tersh command runner", () => {
     assert.equal(result.exitCode, 0);
     assert.equal(loadCount, 2);
     assert.deepEqual(listedTokens, ["fresh.jwt"]);
+  });
+
+  it("fails clearly when missing-token host listing login stores no token", async () => {
+    const tokenStores = [
+      { get: async () => undefined },
+      { get: async () => undefined },
+    ];
+    const result = await run(["hosts"], {
+      configStore: { load: async () => ({ serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } }) },
+      createTokenStore: () => tokenStores.shift(),
+      loginFlow: async () => 0,
+      hostClient: {
+        listHosts: async () => {
+          throw new Error("must not list hosts without token");
+        },
+      },
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /login did not store a session token/);
   });
 
   it("returns clear listing failures without calling secret-returning host endpoints", async () => {
@@ -247,6 +271,54 @@ describe("tersh command runner", () => {
     assert.deepEqual(loginCalls, ["login"]);
     assert.deepEqual(listedTokens, ["expired.jwt", "fresh.jwt"]);
     assert.match(result.stderr, /Stored Termix session token was rejected/);
+  });
+
+  it("fails clearly when host-list login recovery stores no token", async () => {
+    const tokenStores = [
+      { get: async () => "expired.jwt" },
+      { get: async () => undefined },
+    ];
+    const listedTokens = [];
+
+    const result = await run(["hosts"], {
+      configStore: { load: async () => ({ serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } }) },
+      createTokenStore: () => tokenStores.shift(),
+      loginFlow: async () => 0,
+      hostClient: {
+        listHosts: async ({ token }) => {
+          listedTokens.push(token);
+          throw Object.assign(new Error("authentication required"), { statusCode: 401 });
+        },
+      },
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(listedTokens, ["expired.jwt"]);
+    assert.match(result.stderr, /login did not store a session token/);
+  });
+
+  it("fails clearly when host-list auth recovery is rejected again", async () => {
+    const tokenStores = [
+      { get: async () => "expired.jwt" },
+      { get: async () => "fresh.jwt" },
+    ];
+    const listedTokens = [];
+
+    const result = await run(["hosts"], {
+      configStore: { load: async () => ({ serverUrl: "https://termix.example", tls: {}, tokenStorage: { type: "keychain" } }) },
+      createTokenStore: () => tokenStores.shift(),
+      loginFlow: async () => 0,
+      hostClient: {
+        listHosts: async ({ token }) => {
+          listedTokens.push(token);
+          throw Object.assign(new Error("authentication required"), { statusCode: 401 });
+        },
+      },
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(listedTokens, ["expired.jwt", "fresh.jwt"]);
+    assert.match(result.stderr, /Termix host listing still requires login recovery after retry/);
   });
 
   it("logs in with username and password and stores only the final token", async () => {
