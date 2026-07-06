@@ -1,0 +1,19 @@
+{
+  "name": "tersh",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local terminal CLI for connecting to Termix-managed SSH hosts.",
+  "type": "module",
+  "bin": {
+    "tersh": "./bin/tersh.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "node --check bin/tersh.js && node --check src/command-runner.js",
+    "test": "node --test"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
