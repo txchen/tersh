@@ -10,6 +10,24 @@ This package supports Termix login/logout, SSH-capable host listing, and a local
 - Windows is experimental for v1.
 - Node.js 24 or newer is required.
 
+## Quick Start
+
+Run without installing:
+
+```sh
+npx @txchen/tersh --help
+npx @txchen/tersh login --server https://termix.example
+npx @txchen/tersh hosts
+npx @txchen/tersh connect <host-id-or-name>
+```
+
+Or install globally to use the `tersh` command directly:
+
+```sh
+npm install -g @txchen/tersh
+tersh --help
+```
+
 ## Local Development
 
 Run the focused command-boundary test suite:
@@ -24,7 +42,7 @@ Run syntax checks:
 npm run check
 ```
 
-## Local Execution
+## Local Execution From Source
 
 Run the binary through Node:
 
@@ -38,7 +56,7 @@ Run it directly from the working tree:
 ./bin/tersh.js --help
 ```
 
-## Local Linking
+## Local Linking From Source
 
 Link the package into your active npm prefix:
 
@@ -55,7 +73,7 @@ npm unlink -g tersh
 
 ## Commands
 
-The planned top-level commands are:
+The top-level commands are:
 
 - `tersh login --server <url>`
 - `tersh hosts`
