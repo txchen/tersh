@@ -1,6 +1,6 @@
 # Tersh
 
-`tersh` is a Node 24+ local terminal CLI for connecting to Termix-managed SSH hosts through a Termix server.
+`tersh` is a Node 24+ local terminal CLI for connecting to [Termix](https://github.com/Termix-SSH/Termix)-managed SSH hosts through a Termix server.
 
 This package supports Termix login/logout, SSH-capable host listing, and a local TTY bridge through the Termix Terminal transport.
 
