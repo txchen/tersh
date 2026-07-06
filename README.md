@@ -2,7 +2,7 @@
 
 `tersh` is a Node 24+ local terminal CLI for connecting to Termix-managed SSH hosts through a Termix server.
 
-This package currently supports Termix login/logout and the initial command surface. Later slices will add host discovery and Terminal transport bridging.
+This package supports Termix login/logout, SSH-capable host listing, and a local TTY bridge through the Termix Terminal transport.
 
 ## Runtime Support
 
@@ -62,8 +62,6 @@ The planned top-level commands are:
 - `tersh connect [host-id-or-name]`
 - `tersh logout`
 
-`tersh connect` is intentionally user-visible and exits predictably until its implementation slice lands.
-
 ### Login
 
 ```sh
@@ -109,6 +107,64 @@ tersh connect <host-id-or-name>
 ```
 
 Connect fetches the visible host list with the stored session token, resolves the argument by id or unambiguous name, validates the selected host metadata, and opens the Termix Terminal transport. Local stdin is forwarded to the remote session, remote terminal data is written to stdout, and diagnostics stay on stderr.
+
+Run `tersh connect` without an argument to pick from the visible SSH-capable hosts interactively.
+
+Supported terminal prompts include SSH password/challenge, TOTP retry, host-key verification, changed-host-key warnings, and encrypted SSH key passphrases. Browser-based and manual fallback flows that are outside v1 fail with clear stderr messages instead of collecting extra local secrets or opening a browser.
+
+## Manual Live-Server Smoke Test
+
+Live Termix access is not required for `npm test`, `npm run check`, or CI. This smoke path is optional and should be run only when a maintainer has a reachable Termix server and a safe target host.
+
+Prerequisites:
+
+- A reachable Termix server URL.
+- A valid Termix account, including a TOTP device or backup code if the account requires TOTP.
+- A non-production-critical SSH target host visible to that account.
+- The target host should be safe to open, resize, run harmless commands on, and disconnect from. For first validation, avoid production-critical hosts and long-running sessions.
+- For prompt validation, use hosts that intentionally exercise the desired path: password/TOTP challenge, new or changed host key, encrypted SSH key passphrase, unsupported browser-auth host, or Termix auto-tmux host.
+
+Basic smoke flow:
+
+```sh
+tersh login --server https://termix.example
+tersh hosts
+tersh connect <host-id-or-name>
+tersh connect
+tersh logout
+```
+
+Expected observations:
+
+- `tersh login` prompts on stderr for username/password and, when required, TOTP or backup code. It exits `0` on success and stores only the final session token.
+- `tersh hosts` writes host rows to stdout and diagnostics to stderr. It should not print passwords, private keys, or copied secrets.
+- `tersh connect <host-id-or-name>` opens a local terminal session. Remote terminal data appears on stdout; Termix diagnostics, lifecycle messages, and local prompts appear on stderr.
+- While connected, resize the terminal window and run a harmless command such as `printf 'tersh-smoke\n'`. The session should keep working after resize.
+- Disconnect with the remote shell's normal exit command, such as `exit`. The local terminal should leave raw mode cleanly. A normal remote exit should return `0`; if the remote session reports a nonzero exit code, `tersh connect` should return that code. Local interrupts or abnormal WebSocket closes should restore terminal state and exit nonzero.
+- `tersh connect` without an argument should print a numbered host picker on stderr, accept a selected number, and connect to that host. Enter `q` to cancel and expect exit `130`.
+- `tersh logout` removes stored token material and exits `0`.
+
+Interactive prompt checks, where safe to exercise:
+
+- Password/TOTP SSH challenges should pause raw forwarding, prompt locally with hidden input, and then resume the terminal session.
+- Host-key verification should show the host/fingerprint details and require `accept` or `reject`; changed host keys default to rejection unless `accept` is typed.
+- Encrypted SSH key passphrases should be hidden and not persisted.
+- Unsupported v1 flows should fail clearly on stderr and exit nonzero: manual credential fallback, Warpgate, OPKSSH, Vault browser auth, and automatic tmux session selection. For auto-tmux, the message should recommend disabling Termix auto-tmux for that host or connecting normally and running `tmux attach` manually.
+- If a stored session expires or data access is locked, `hosts` or `connect` should restore terminal state, prompt for one login recovery attempt, and retry once. Repeated failures should exit nonzero with a clear message.
+
+TLS smoke variants:
+
+```sh
+tersh login --server https://termix.example --ca-file /path/to/private-ca.pem
+tersh hosts
+
+tersh login --server https://termix.example --insecure-skip-tls-verify
+tersh hosts
+```
+
+Use `--ca-file` for private CA or self-signed deployments. Use `--insecure-skip-tls-verify` only for explicit test environments; it prints a warning and should not be used for routine production validation.
+
+This repository does not include a live smoke helper script. If you wrap these commands locally, gate the wrapper behind explicit environment variables such as `TERSH_SMOKE_SERVER_URL` and `TERSH_SMOKE_HOST`, and never hardcode credentials, app passwords, session tokens, SSH passwords, private keys, or host secrets.
 
 ## Dependencies
 
