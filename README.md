@@ -2,7 +2,7 @@
 
 `tersh` is a Node 24+ local terminal CLI for connecting to Termix-managed SSH hosts through a Termix server.
 
-This package is currently scaffolded for the initial command surface. Later slices will add login, host discovery, and Terminal transport bridging.
+This package currently supports Termix login/logout and the initial command surface. Later slices will add host discovery and Terminal transport bridging.
 
 ## Runtime Support
 
@@ -62,7 +62,35 @@ The planned top-level commands are:
 - `tersh connect [host-id-or-name]`
 - `tersh logout`
 
-The command placeholders are intentionally user-visible and exit predictably until their implementation slices land.
+`tersh hosts` and `tersh connect` placeholders are intentionally user-visible and exit predictably until their implementation slices land.
+
+### Login
+
+```sh
+tersh login --server https://termix.example
+```
+
+Login prompts locally for username and password. If the Termix server requires TOTP, it then prompts for a TOTP or backup code. Prompts and diagnostics are written to stderr.
+
+The login request uses Termix's native-app JWT path and stores only the final session token.
+
+Optional TLS and storage flags:
+
+```sh
+tersh login --server https://termix.example --ca-file /path/to/ca.pem
+tersh login --server https://termix.example --insecure-skip-tls-verify
+tersh login --server https://termix.example --token-store file
+```
+
+HTTPS is required by default. Plain HTTP is used only when the configured server URL explicitly starts with `http://`. The file token fallback is explicit, warns on use, writes with `0600` permissions, and refuses to write token material inside the project directory.
+
+### Logout
+
+```sh
+tersh logout
+```
+
+Logout removes stored token material and leaves non-secret server config intact.
 
 ## Dependencies
 
