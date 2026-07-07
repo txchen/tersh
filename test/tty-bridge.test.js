@@ -193,6 +193,17 @@ describe("TTY bridge", () => {
     assert.deepEqual(ws.closedWith, { code: 1000, reason: "client finished" });
   });
 
+  it("normalizes legacy mouse reporting bytes before forwarding input", async () => {
+    const { bridge, ws, stdin } = bridgeFixture();
+    bridge.start();
+    ws.emit("open");
+
+    stdin.write(Buffer.from([0x1b, 0x5b, 0x4d, 0x20, 0xa0, 0x25]));
+
+    assert.equal(ws.sent[1].type, "input");
+    assert.equal(ws.sent[1].data, "\x1b[<0;128;5M");
+  });
+
   it("restores terminal state on error and close", async () => {
     const { bridge, ws, stdin, stderr } = bridgeFixture();
     const done = bridge.start();

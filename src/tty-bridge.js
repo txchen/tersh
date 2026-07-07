@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { StringDecoder } from "node:string_decoder";
 
 import { sanitizeHostForTerminal } from "./host-discovery.js";
 import { createNodePrompts } from "./prompts.js";
@@ -71,6 +72,7 @@ export class TermixTtyBridge {
     this.pendingPrompts = 0;
     this.promptQueue = Promise.resolve();
     this.rawModeWasSet = false;
+    this.inputDecoder = new StringDecoder("utf8");
     this.exitCode = 0;
     this.done = new Promise((resolve) => {
       this.resolveDone = resolve;
@@ -134,7 +136,11 @@ export class TermixTtyBridge {
       return;
     }
 
-    const data = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    const data = Buffer.isBuffer(chunk) ? normalizeTerminalInput(chunk, this.inputDecoder) : String(chunk);
+    if (data === "") {
+      return;
+    }
+
     this.send({ type: "input", data });
     if (data === ctrlD) {
       this.finish(0);
@@ -438,4 +444,36 @@ function recoverableTerminalFailureResult(reason) {
     recoverableAuthFailure: true,
     reason,
   };
+}
+
+function normalizeTerminalInput(chunk, decoder) {
+  let input = "";
+  let segmentStart = 0;
+
+  for (let index = 0; index <= chunk.length - 6; index += 1) {
+    if (!isLegacyMouseReportAt(chunk, index)) {
+      continue;
+    }
+
+    input += decoder.write(chunk.subarray(segmentStart, index));
+    input += legacyMouseReportToSgr(chunk[index + 3], chunk[index + 4], chunk[index + 5]);
+    index += 5;
+    segmentStart = index + 1;
+  }
+
+  input += decoder.write(chunk.subarray(segmentStart));
+  return input;
+}
+
+function isLegacyMouseReportAt(chunk, index) {
+  return chunk[index] === 0x1b && chunk[index + 1] === 0x5b && chunk[index + 2] === 0x4d;
+}
+
+function legacyMouseReportToSgr(buttonByte, xByte, yByte) {
+  const button = buttonByte - 32;
+  const x = xByte - 32;
+  const y = yByte - 32;
+  const suffix = (button & 3) === 3 ? "m" : "M";
+
+  return `\x1b[<${button};${x};${y}${suffix}`;
 }
