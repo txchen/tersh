@@ -1,6 +1,6 @@
 {
   "name": "@txchen/tersh",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local terminal CLI for connecting to Termix-managed SSH hosts.",
   "type": "module",
   "bin": {
